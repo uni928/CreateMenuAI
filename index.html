@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>1週間の献立提案＆買い物リスト</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; max-width: 1000px; margin: auto; }
+    textarea { width: 100%; height: 60px; margin-bottom: 10px; resize: vertical; font-family: monospace; }
+    input[type="number"], select { font-size: 14px; margin-bottom: 10px; }
+    label { display: block; margin-top: 10px; }
+    .day-block { border: 1px solid #ccc; padding: 10px; margin-bottom: 15px; border-radius: 6px; }
+    .preset-btn { margin-left: 5px; font-size: 14px; padding: 4px 8px; cursor: pointer; }
+    button { margin-top: 10px; padding: 10px 20px; font-size: 16px; }
+    #status { margin-top: 10px; color: green; }
+    #error { color: red; margin-top: 10px; }
+    #shoppingList { height: 180px; margin-top: 20px; }
+  </style>
+</head>
+<body>
+
+<h2>1週間の献立提案ツール</h2>
+
+<label>OpenAI APIキー（ChatGPT）:
+  <input type="password" id="openaiKeyInput" style="width:300px;" placeholder="sk-..." />
+</label><br>
+
+<label>Gemini APIキー（Google AI）:
+  <input type="password" id="geminiKeyInput" style="width:300px;" placeholder="AIza..." />
+</label><br>
+
+<button id="setApiKeyBtn">APIキーを読み込み</button>
+<div id="apiStatus" style="margin-top:10px; color: blue;"></div>
+
+
+<label>1日分の予算（円）:
+  <input type="number" id="budgetInput" value="600" style="width: 80px;" />
+  <button type="button" class="preset-btn" data-value="600">600</button>
+  <button type="button" class="preset-btn" data-value="800">800</button>
+  <button type="button" class="preset-btn" data-value="1000">1000</button>
+  <button type="button" class="preset-btn" data-value="1200">1200</button>
+</label>
+
+<label>メモ（任意）:
+  <input type="text" id="noteInput" placeholder="例: 朝はパンのみで" style="width: 300px;" />
+</label>
+
+<label>買い物先の希望:
+  <select id="storeSelector">
+    <option value="スーパー">スーパー</option>
+    <option value="コンビニ">コンビニ</option>
+  </select>
+</label>
+
+<div id="weekContainer"></div>
+
+<button id="completeBtn">献立を提案する</button>　<button id="exportBtn">📄 テキストファイルで出力</button>　<button id="copyBtn">📄 内容をコピーする</button>
+
+<br><button id="saveToFileBtn">💾 ファイルに保存</button><input type="file" id="loadFromFileInput" style="display: none;" accept=".json">　<button id="loadFromFileBtn">📂 ファイルから読み込み</button>
+
+
+
+<div id="status"></div>
+<div id="error"></div>
+
+<h3>🛍 今週の買い物リスト</h3>
+<textarea id="shoppingList" placeholder="食材一覧がここに表示されます"></textarea>
+
+<script>
+  let openaiKey = "";
+  let geminiKey = "";
+  let useGemini = false;
+
+// 読み込みボタンでキー設定
+document.getElementById("setApiKeyBtn").addEventListener("click", () => {
+  openaiKey = document.getElementById("openaiKeyInput").value.trim();
+  geminiKey = document.getElementById("geminiKeyInput").value.trim();
+  useGemini = !!geminiKey;
+
+  if (!openaiKey && !geminiKey) {
+    document.getElementById("apiStatus").textContent = "APIキーを入力してください。";
+    document.getElementById("apiStatus").style.color = "red";
+  } else {
+    document.getElementById("apiStatus").textContent = useGemini
+      ? "Gemini APIキーが設定されました。"
+      : "OpenAI APIキーが設定されました。";
+    document.getElementById("apiStatus").style.color = "green";
+  }
+});
+
+
+  const days = ["月", "火", "水", "木", "金", "土", "日"];
+  const weekContainer = document.getElementById("weekContainer");
+
+  days.forEach(day => {
+    const block = document.createElement("div");
+    block.className = "day-block";
+    block.innerHTML = `
+      <h3>${day}曜日</h3>
+      <label>朝食:</label>
+      <textarea id="${day}_morning" placeholder="朝食"></textarea>
+      <label>昼食:</label>
+      <textarea id="${day}_lunch" placeholder="昼食"></textarea>
+      <label>夕食:</label>
+      <textarea id="${day}_dinner" placeholder="夕食"></textarea>
+    `;
+    weekContainer.appendChild(block);
+  });
+
+  document.querySelectorAll(".preset-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const value = btn.getAttribute("data-value");
+      document.getElementById("budgetInput").value = value;
+    });
+  });
+
+// 献立生成ボタンの中身（既存処理の中身を書き換え）
+document.getElementById("completeBtn").addEventListener("click", async () => {
+  const budgetPerDay = parseInt(document.getElementById("budgetInput").value, 10) || 600;
+  const store = document.getElementById("storeSelector").value;
+  const totalBudget = budgetPerDay * 7;
+  const button = document.getElementById("completeBtn");
+  const status = document.getElementById("status");
+  const error = document.getElementById("error");
+  const shoppingList = document.getElementById("shoppingList");
+
+  // 状態リセット
+  button.disabled = true;
+  button.textContent = "計算中...";
+  status.textContent = "献立を生成中です…";
+  error.textContent = "";
+  shoppingList.value = "";
+
+  const prompt = `以下の条件で、1週間分の献立（朝・昼・夜）と買い物リストを提案してください：
+- 各曜日に朝食・昼食・夕食を提案してください
+- 1日あたりの予算は ${budgetPerDay} 円、週合計で ${totalBudget} 円以内に収めてください
+- 買い物先は ${store}
+- 食材はできるだけ使い回して節約を意識してください
+- 出力フォーマットは以下のようにしてください：
+
+【献立】
+月曜日
+朝食: ...
+昼食: ...
+夕食: ...
+（以下、火〜日）
+
+【買い物リスト】
+- 食材名 × 数量`;
+
+  try {
+    const content = useGemini
+      ? await completeWithGemini(prompt)
+      : await completeWithChatGPT(prompt);
+
+    days.forEach(day => {
+      const regex = new RegExp(`${day}曜日[\\s\\S]*?朝食[:：\\n]([\\s\\S]*?)昼食[:：\\n]([\\s\\S]*?)夕食[:：\\n]([\\s\\S]*?)(?=\\n|\\r|\\n${day === "日" ? "【買い物" : days[days.indexOf(day)+1]+"曜"})`, "i");
+      const match = content.match(regex);
+      document.getElementById(`${day}_morning`).value = match?.[1]?.trim() || "";
+      document.getElementById(`${day}_lunch`).value = match?.[2]?.trim() || "";
+      document.getElementById(`${day}_dinner`).value = match?.[3]?.trim() || "";
+    });
+
+    const shoppingMatch = content.match(/【買い物リスト】([\s\S]*)/);
+    shoppingList.value = shoppingMatch?.[1]?.trim() || "（見つかりませんでした）";
+
+    status.textContent = "献立と買い物リストを提案しました。";
+  } catch (err) {
+    console.error("APIエラー詳細:", err);
+    error.textContent = "エラー: " + (err.message || "不明なエラー");
+    status.textContent = "";
+  } finally {
+    button.disabled = false;
+    button.textContent = "献立を提案する";
+  }
+});
+
+
+
+document.getElementById("exportBtn").addEventListener("click", () => {
+    const days = ["月", "火", "水", "木", "金", "土", "日"];
+    let output = `【1週間の献立】\n`;
+
+    days.forEach(day => {
+      const morning = document.getElementById(`${day}_morning`).value.trim();
+      const lunch   = document.getElementById(`${day}_lunch`).value.trim();
+      const dinner  = document.getElementById(`${day}_dinner`).value.trim();
+      output += `\n■ ${day}曜日\n`;
+      output += `朝食: ${morning || "（未入力）"}\n`;
+      output += `昼食: ${lunch || "（未入力）"}\n`;
+      output += `夕食: ${dinner || "（未入力）"}\n`;
+    });
+
+    output += `\n【買い物リスト】\n`;
+    const shopping = document.getElementById("shoppingList").value.trim();
+    output += shopping || "（未入力）";
+
+    // 日付付きファイル名生成
+    const today = new Date();
+    const yyyymmdd = today.toISOString().slice(0,10).replace(/-/g, "");
+    const fileName = `kondate_${yyyymmdd}.txt`;
+
+    // テキストファイルとしてダウンロード
+    const blob = new Blob([output], { type: "text/plain;charset=utf-8" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = fileName;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  });
+
+document.getElementById("copyBtn").addEventListener("click", () => {
+    const days = ["月", "火", "水", "木", "金", "土", "日"];
+    let output = `【1週間の献立】\n`;
+
+    days.forEach(day => {
+      const morning = document.getElementById(`${day}_morning`).value.trim();
+      const lunch   = document.getElementById(`${day}_lunch`).value.trim();
+      const dinner  = document.getElementById(`${day}_dinner`).value.trim();
+      output += `\n■ ${day}曜日\n`;
+      output += `朝食: ${morning || "（未入力）"}\n`;
+      output += `昼食: ${lunch || "（未入力）"}\n`;
+      output += `夕食: ${dinner || "（未入力）"}\n`;
+    });
+
+    output += `\n【買い物リスト】\n`;
+    const shopping = document.getElementById("shoppingList").value.trim();
+    output += shopping || "（未入力）";
+
+    navigator.clipboard.writeText(output)
+    .then(() => {
+      alert("コピーしました");
+    })
+    .catch(err => {
+      alert("コピーに失敗しました");
+    });
+  });
+
+// ChatGPT補完部分を関数化
+async function completeWithChatGPT(prompt) {
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${openaiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: "あなたは優秀な家庭の栄養士です。" },
+        { role: "user", content: prompt }
+      ],
+      max_tokens: 2000,
+      temperature: 0.7
+    })
+  });
+  if (!res.ok) throw new Error("ChatGPT APIエラー: " + res.status);
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || "";
+}
+
+// Gemini補完
+async function completeWithGemini(prompt) {
+  if (!geminiKey) throw new Error("Gemini APIキーが設定されていません");
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`;
+
+  const body = {
+    contents: [{
+      role: "user",
+      parts: [{ text: prompt }]
+    }],
+    generationConfig: {
+      temperature: 0.7,
+      topP: 1.0,
+      maxOutputTokens: 2048
+    }
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error("Gemini APIエラー: " + res.status + "\n" + errorText);
+  }
+
+  const data = await res.json();
+  const result = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!result) throw new Error("Geminiのレスポンスに有効な結果がありません");
+  return result;
+}
+
+// 🔹 ファイルに保存
+document.getElementById("saveToFileBtn").addEventListener("click", () => {
+  const data = {
+    openaiKey: document.getElementById("openaiKeyInput").value.trim(),
+    geminiKey: document.getElementById("geminiKeyInput").value.trim(),
+    note: document.getElementById("noteInput")?.value || "",
+    budget: document.getElementById("budgetInput").value,
+    store: document.getElementById("storeSelector").value,
+    shopping: document.getElementById("shoppingList").value,
+    days: {}
+  };
+
+  ["月", "火", "水", "木", "金", "土", "日"].forEach(day => {
+    data.days[day] = {
+      morning: document.getElementById(`${day}_morning`).value,
+      lunch: document.getElementById(`${day}_lunch`).value,
+      dinner: document.getElementById(`${day}_dinner`).value
+    };
+  });
+
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const link = document.createElement("a");
+  const now = new Date().toISOString().slice(0, 10);
+  link.download = `kondate_data_${now}.json`;
+  link.href = URL.createObjectURL(blob);
+  link.click();
+  URL.revokeObjectURL(link.href);
+});
+
+// 🔹 ファイル読み込みトリガー
+document.getElementById("loadFromFileBtn").addEventListener("click", () => {
+  document.getElementById("loadFromFileInput").click();
+});
+
+// 🔹 ファイル選択後の読み込み処理
+document.getElementById("loadFromFileInput").addEventListener("change", e => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+
+      document.getElementById("openaiKeyInput").value = data.openaiKey || "";
+      document.getElementById("geminiKeyInput").value = data.geminiKey || "";
+      document.getElementById("noteInput").value = data.note || "";
+      document.getElementById("budgetInput").value = data.budget || 600;
+      document.getElementById("storeSelector").value = data.store || "スーパー";
+      document.getElementById("shoppingList").value = data.shopping || "";
+
+      if (data.days) {
+        Object.entries(data.days).forEach(([day, meals]) => {
+          document.getElementById(`${day}_morning`).value = meals.morning || "";
+          document.getElementById(`${day}_lunch`).value = meals.lunch || "";
+          document.getElementById(`${day}_dinner`).value = meals.dinner || "";
+        });
+      }
+
+openaiKey = document.getElementById("openaiKeyInput").value.trim();
+  geminiKey = document.getElementById("geminiKeyInput").value.trim();
+  useGemini = !!geminiKey;
+
+  if (!openaiKey && !geminiKey) {
+    document.getElementById("apiStatus").textContent = "APIキーを入力してください。";
+    document.getElementById("apiStatus").style.color = "red";
+  } else {
+    document.getElementById("apiStatus").textContent = useGemini
+      ? "Gemini APIキーが設定されました。"
+      : "OpenAI APIキーが設定されました。";
+    document.getElementById("apiStatus").style.color = "green";
+  }
+
+      alert("ファイルから読み込みました！");
+    } catch (err) {
+      alert("読み込み失敗：" + err.message);
+    }
+  };
+  reader.readAsText(file);
+});
+
+
+</script>
+
+
+</body>
+</html>
