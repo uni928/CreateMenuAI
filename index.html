@@ -115,6 +115,20 @@ document.getElementById("setApiKeyBtn").addEventListener("click", () => {
 
 // 献立生成ボタンの中身（既存処理の中身を書き換え）
 document.getElementById("completeBtn").addEventListener("click", async () => {
+  openaiKey = document.getElementById("openaiKeyInput").value.trim();
+  geminiKey = document.getElementById("geminiKeyInput").value.trim();
+  useGemini = !!geminiKey;
+
+  if (!openaiKey && !geminiKey) {
+    document.getElementById("apiStatus").textContent = "APIキーを入力してください。";
+    document.getElementById("apiStatus").style.color = "red";
+  } else {
+    document.getElementById("apiStatus").textContent = useGemini
+      ? "Gemini APIキーが設定されました。"
+      : "OpenAI APIキーが設定されました。";
+    document.getElementById("apiStatus").style.color = "green";
+  }
+
   const budgetPerDay = parseInt(document.getElementById("budgetInput").value, 10) || 600;
   const store = document.getElementById("storeSelector").value;
   const totalBudget = budgetPerDay * 7;
